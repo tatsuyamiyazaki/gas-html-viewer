@@ -337,6 +337,63 @@
       to { transform: rotate(360deg); }
     }
 
+    /* Folder Breadcrumb */
+    .breadcrumb {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.15rem;
+      padding: 0.25rem 1.25rem 0.5rem 1.25rem;
+      font-family: var(--font-sans);
+      font-size: 0.75rem;
+      min-height: 1.6rem;
+    }
+
+    .breadcrumb-item {
+      background: none;
+      border: none;
+      padding: 0.15rem 0.4rem;
+      border-radius: var(--rounded-sm);
+      color: var(--colors-muted);
+      font: inherit;
+      cursor: pointer;
+      max-width: 9rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      transition: var(--transition-smooth);
+    }
+
+    .breadcrumb-item:hover {
+      background: var(--colors-surface-card);
+      color: var(--colors-ink);
+    }
+
+    .breadcrumb-item.current {
+      color: var(--colors-ink);
+      font-weight: 600;
+      cursor: default;
+      background: none;
+    }
+
+    .breadcrumb-sep {
+      color: var(--colors-hairline);
+      font-size: 0.7rem;
+    }
+
+    /* Folder Rows */
+    .file-item.folder .file-item-icon {
+      background: var(--colors-surface-soft);
+    }
+
+    .file-item.folder .file-item-icon svg {
+      fill: var(--colors-accent-amber);
+    }
+
+    .file-item.folder .file-item-details {
+      color: var(--colors-muted-soft);
+    }
+
     /* File Count Row */
     .sidebar-meta-row {
       padding: 0 1.25rem 0.5rem 1.25rem;
@@ -1097,19 +1154,22 @@
           <svg class="search-icon" viewBox="0 0 24 24">
             <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
           </svg>
-          <input type="text" id="search-input" class="search-input" placeholder="ファイルを検索..." disabled>
+          <input type="text" id="search-input" class="search-input" placeholder="このフォルダ内を絞り込み..." disabled>
         </div>
-        
-        <button id="btn-sync" class="btn-sync" title="Google Driveを再スキャン" disabled>
+
+        <button id="btn-sync" class="btn-sync" title="このフォルダを再読み込み" disabled>
           <svg id="sync-icon" viewBox="0 0 24 24" class="spinning">
             <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.07 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
           </svg>
         </button>
       </div>
 
+      <!-- Folder Breadcrumb -->
+      <nav class="breadcrumb" id="breadcrumb" aria-label="フォルダ階層"></nav>
+
       <!-- Dynamic Info Counts -->
       <div class="sidebar-meta-row">
-        <div class="file-count" id="file-count">スキャン中...</div>
+        <div class="file-count" id="file-count">読み込み中...</div>
       </div>
 
       <!-- File List Scroll Holder -->
@@ -1260,18 +1320,22 @@
      9. CLIENT-SIDE WEBAPP SCRIPTS (100% Intact Logic)
      ========================================== -->
   <script>
-    // Global caches
-    let rawDriveFiles = []; // Holds the full array from Drive
-    let driveFilesMap = {}; // Keyed ID lookup map
-    let loadedContent = ""; // Caches current loaded file content
+    // Navigation state
+    const ROOT_CRUMB = { name: 'ドライブ', location: { kind: 'root' } };
+    let pathStack = [ROOT_CRUMB];   // Breadcrumb trail; last entry is the open folder
+    let currentItems = [];          // Items (folders + files) of the open folder
+    let filesMap = {};              // id -> file item, for the open folder
+    let loadedContent = "";         // Caches current loaded file content
+    let listRequestSeq = 0;         // Guards against out-of-order list responses
 
     // DOM Elements Handles
     const searchInput = document.getElementById('search-input');
     const btnSync = document.getElementById('btn-sync');
     const syncIcon = document.getElementById('sync-icon');
+    const breadcrumbNav = document.getElementById('breadcrumb');
     const fileListContainer = document.getElementById('file-list');
     const fileCountText = document.getElementById('file-count');
-    
+
     const topMetaCard = document.getElementById('top-meta-card');
     const activeBadge = document.getElementById('active-badge');
     const activeFileTitle = document.getElementById('active-file-title');
@@ -1279,103 +1343,116 @@
     const metaSize = document.getElementById('meta-size');
     const metaUpdated = document.getElementById('meta-updated');
     const metaDriveUrl = document.getElementById('meta-drive-url');
-    
+
     const overlayEmpty = document.getElementById('overlay-empty');
     const overlayLoading = document.getElementById('overlay-loading');
     const loadingTitle = document.getElementById('loading-title');
     const loadingDesc = document.getElementById('loading-desc');
-    
+
     const iframeContainer = document.getElementById('iframe-container');
     const viewerIframe = document.getElementById('viewer-iframe');
     const sourceContainer = document.getElementById('source-container');
     const sourceCodeBlock = document.getElementById('source-code-block');
     const addressFileName = document.getElementById('address-file-name');
-    
+
     const statusDot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
 
+    const ICON_FOLDER = '<path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>';
+    const ICON_FILE = '<path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/>';
+
     // On Load trigger initialization sequence
     window.addEventListener('DOMContentLoaded', () => {
-      triggerScan();
-      
-      // Keystroke listener for real-time file searching
+      loadCurrentFolder();
+
       searchInput.addEventListener('input', () => {
         handleSearch();
       });
 
-      // Sync Trigger button click
       btnSync.addEventListener('click', () => {
-        triggerScan();
+        loadCurrentFolder();
       });
     });
 
     /**
-     * Start Drive Files Scan Backend call
+     * Push a folder onto the path and load it
      */
-    function triggerScan() {
+    function openFolder(index) {
+      const item = currentItems[index];
+      if (!item || item.type !== 'folder') return;
+      pathStack = [...pathStack, { name: item.name, location: item.location }];
+      loadCurrentFolder();
+    }
+
+    /**
+     * Jump back to an ancestor in the breadcrumb
+     */
+    function navigateToCrumb(depth) {
+      if (depth < 0 || depth >= pathStack.length - 1) return;
+      pathStack = pathStack.slice(0, depth + 1);
+      loadCurrentFolder();
+    }
+
+    /**
+     * Fetch children of the folder at the top of the path
+     */
+    function loadCurrentFolder() {
+      const crumb = pathStack[pathStack.length - 1];
+      const seq = ++listRequestSeq;
+
       setGlobalStatus('scanning');
+      searchInput.value = '';
       searchInput.disabled = true;
       btnSync.disabled = true;
       syncIcon.classList.add('spinning');
-      
-      // Empty List states with loading indicator
+      renderBreadcrumb();
+
       fileListContainer.innerHTML = `
         <div class="list-spinner-container">
           <div class="glowing-spinner"></div>
-          <span style="font-size: 0.75rem; color: var(--colors-muted); margin-top: 0.5rem; font-family: var(--font-sans);">ドライブをスキャン中...</span>
+          <span style="font-size: 0.75rem; color: var(--colors-muted); margin-top: 0.5rem; font-family: var(--font-sans);">「${escapeHtml(crumb.name)}」を読み込み中...</span>
         </div>
       `;
-      fileCountText.textContent = '同期中...';
+      fileCountText.textContent = '読み込み中...';
 
       google.script.run
-        .withSuccessHandler(onScanSuccess)
-        .withFailureHandler(onScanFailure)
-        .getHtmlFiles();
+        .withSuccessHandler(result => onListSuccess(result, seq))
+        .withFailureHandler(error => onListFailure(error, seq))
+        .listChildren(crumb.location);
     }
 
     /**
-     * Scan success callback handler
+     * Folder listing success callback handler
      */
-    function onScanSuccess(result) {
+    function onListSuccess(result, seq) {
+      if (seq !== listRequestSeq) return; // A newer navigation superseded this one
       syncIcon.classList.remove('spinning');
       btnSync.disabled = false;
-      
+
       if (!result.success) {
-        showToast('error', 'スキャンに失敗しました: ' + result.error);
+        showToast('error', 'フォルダの読み込みに失敗しました: ' + result.error);
         setGlobalStatus('error', 'エラーが発生しました');
-        fileListContainer.innerHTML = `<div class="list-empty-state">読み込みに失敗しました。<br>${result.error}</div>`;
+        fileListContainer.innerHTML = `<div class="list-empty-state">読み込みに失敗しました。<br>${escapeHtml(result.error)}</div>`;
         fileCountText.textContent = 'エラー';
         return;
       }
-      
-      rawDriveFiles = result.files || [];
-      driveFilesMap = {}; // Reset lookup map
-      
-      if (rawDriveFiles.length === 0) {
-        showToast('info', 'HTMLファイルが見つかりませんでした');
-        setGlobalStatus('idle');
-        fileListContainer.innerHTML = `<div class="list-empty-state">Google ドライブに<br>HTMLファイルが存在しません。</div>`;
-        fileCountText.textContent = '0件のファイル';
-        return;
-      }
 
-      // Populate Cache Maps
-      rawDriveFiles.forEach(file => {
-        driveFilesMap[file.id] = file;
+      currentItems = result.items || [];
+      filesMap = {};
+      currentItems.forEach(item => {
+        if (item.type === 'file') filesMap[item.id] = item;
       });
 
-      searchInput.disabled = false;
+      searchInput.disabled = currentItems.length === 0;
       setGlobalStatus('idle');
-      showToast('success', `${rawDriveFiles.length}件のHTMLファイルを同期しました。`);
-
-      // Render the complete list
-      renderFileList(rawDriveFiles);
+      renderItemList(currentItems);
     }
 
     /**
-     * Scan failure callback handler
+     * Folder listing failure callback handler
      */
-    function onScanFailure(error) {
+    function onListFailure(error, seq) {
+      if (seq !== listRequestSeq) return;
       syncIcon.classList.remove('spinning');
       btnSync.disabled = false;
       setGlobalStatus('error', 'API接続エラー');
@@ -1385,107 +1462,125 @@
     }
 
     /**
-     * Renders array of files inside left sidebar list holder
+     * Renders the breadcrumb trail for the current path
      */
-    function renderFileList(files) {
-      if (files.length === 0) {
-        fileListContainer.innerHTML = `<div class="list-empty-state">該当するファイルが<br>見つかりません。</div>`;
-        fileCountText.textContent = `0 / ${rawDriveFiles.length} 件`;
-        return;
-      }
-
-      let listHtml = '';
-      files.forEach(file => {
-        const displaySize = formatBytes(file.size);
-        const displayDate = formatTimestampShort(file.updated);
-        
-        listHtml += `
-          <div class="file-item" id="item-${file.id}" onclick="selectFile('${file.id}')">
-            <div class="file-item-icon">
-              <!-- Inline Doc XML SVG -->
-              <svg viewBox="0 0 24 24">
-                <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/>
-              </svg>
-            </div>
-            <div class="file-item-info">
-              <div class="file-item-name" title="${escapeHtmlAttr(file.name)}">${escapeHtml(file.name)}</div>
-              <div class="file-item-details">
-                <span class="file-item-size">${displaySize}</span>
-                <span class="file-item-dot">&bull;</span>
-                <span class="file-item-date">${displayDate}</span>
-              </div>
-            </div>
-          </div>
-        `;
+    function renderBreadcrumb() {
+      const parts = pathStack.map((crumb, depth) => {
+        const isCurrent = depth === pathStack.length - 1;
+        const label = escapeHtml(crumb.name);
+        const button = isCurrent
+          ? `<span class="breadcrumb-item current" title="${escapeHtmlAttr(crumb.name)}">${label}</span>`
+          : `<button type="button" class="breadcrumb-item" title="${escapeHtmlAttr(crumb.name)}" onclick="navigateToCrumb(${depth})">${label}</button>`;
+        return depth === 0 ? button : `<span class="breadcrumb-sep">›</span>${button}`;
       });
-
-      fileListContainer.innerHTML = listHtml;
-      
-      // Keep active state styling if there was an active selection
-      const activeId = getActiveFileId();
-      if (activeId && driveFilesMap[activeId]) {
-        const activeNode = document.getElementById(`item-${activeId}`);
-        if (activeNode) {
-          activeNode.classList.add('active');
-        }
-      }
-
-      // Update count text
-      if (files.length === rawDriveFiles.length) {
-        fileCountText.textContent = `${rawDriveFiles.length}件のファイル`;
-      } else {
-        fileCountText.textContent = `${files.length} / ${rawDriveFiles.length}件表示`;
-      }
+      breadcrumbNav.innerHTML = parts.join('');
     }
 
     /**
-     * Filters list based on search keyup inputs
+     * Renders folders and files of the open folder inside the sidebar list
+     */
+    function renderItemList(items) {
+      if (items.length === 0) {
+        const message = currentItems.length === 0
+          ? 'このフォルダには<br>サブフォルダもHTMLファイルもありません。'
+          : '該当する項目が<br>見つかりません。';
+        fileListContainer.innerHTML = `<div class="list-empty-state">${message}</div>`;
+        updateCountText(0);
+        return;
+      }
+
+      const listHtml = items.map(item => {
+        const index = currentItems.indexOf(item);
+        return item.type === 'folder' ? renderFolderRow(item, index) : renderFileRow(item);
+      }).join('');
+
+      fileListContainer.innerHTML = listHtml;
+
+      const activeId = getActiveFileId();
+      if (activeId && filesMap[activeId]) {
+        const activeNode = document.getElementById(`item-${activeId}`);
+        if (activeNode) activeNode.classList.add('active');
+      }
+
+      updateCountText(items.length);
+    }
+
+    function renderFolderRow(item, index) {
+      return `
+        <div class="file-item folder" onclick="openFolder(${index})">
+          <div class="file-item-icon"><svg viewBox="0 0 24 24">${ICON_FOLDER}</svg></div>
+          <div class="file-item-info">
+            <div class="file-item-name" title="${escapeHtmlAttr(item.name)}">${escapeHtml(item.name)}</div>
+            <div class="file-item-details"><span>フォルダ</span></div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderFileRow(file) {
+      return `
+        <div class="file-item" id="item-${file.id}" onclick="selectFile('${file.id}')">
+          <div class="file-item-icon"><svg viewBox="0 0 24 24">${ICON_FILE}</svg></div>
+          <div class="file-item-info">
+            <div class="file-item-name" title="${escapeHtmlAttr(file.name)}">${escapeHtml(file.name)}</div>
+            <div class="file-item-details">
+              <span class="file-item-size">${formatBytes(file.size)}</span>
+              <span class="file-item-dot">&bull;</span>
+              <span class="file-item-date">${formatTimestampShort(file.updated)}</span>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function updateCountText(shownCount) {
+      const folderCount = currentItems.filter(item => item.type === 'folder').length;
+      const fileCount = currentItems.length - folderCount;
+      const total = `フォルダ ${folderCount} / HTML ${fileCount}`;
+      fileCountText.textContent = shownCount === currentItems.length
+        ? total
+        : `${shownCount}件表示 (${total})`;
+    }
+
+    /**
+     * Filters the open folder's items by name
      */
     function handleSearch() {
       const query = searchInput.value.toLowerCase().trim();
       if (!query) {
-        renderFileList(rawDriveFiles);
+        renderItemList(currentItems);
         return;
       }
-      
-      const filtered = rawDriveFiles.filter(file => {
-        return file.name.toLowerCase().includes(query);
-      });
-      renderFileList(filtered);
+      renderItemList(currentItems.filter(item => item.name.toLowerCase().includes(query)));
     }
 
     /**
      * File item clicked action flow
      */
     function selectFile(fileId) {
-      if (!fileId || !driveFilesMap[fileId]) return;
-      const file = driveFilesMap[fileId];
+      if (!fileId || !filesMap[fileId]) return;
+      const file = filesMap[fileId];
 
-      // Remove active states from all sidebar item lists
       const items = document.querySelectorAll('.file-item');
       items.forEach(node => node.classList.remove('active'));
 
-      // Add active state to the clicked item
       const activeNode = document.getElementById(`item-${fileId}`);
       if (activeNode) {
         activeNode.classList.add('active');
       }
 
-      // Update Top Details Bar
       activeBadge.textContent = '選択中';
       activeBadge.className = 'active-badge selected';
       activeFileTitle.textContent = file.name;
       activeFileTitle.title = file.name;
-      
+
       metaSize.textContent = formatBytes(file.size);
       metaUpdated.textContent = formatTimestamp(file.updated);
       metaDriveUrl.href = file.url;
-      
-      // Reveal metrics action elements
+
       topMetaMetrics.style.opacity = '1';
       topMetaMetrics.style.pointerEvents = 'auto';
 
-      // Load content from server
       loadFileContent(fileId);
     }
 
@@ -1493,10 +1588,9 @@
      * Call GAS server file reading endpoint
      */
     function loadFileContent(fileId) {
-      const fileMeta = driveFilesMap[fileId];
+      const fileMeta = filesMap[fileId];
       if (!fileMeta) return;
 
-      // Enable Loading overlays
       overlayEmpty.classList.add('hidden');
       overlayLoading.classList.remove('hidden');
       loadingTitle.textContent = 'ファイルをロード中...';
@@ -1513,7 +1607,7 @@
      */
     function onContentSuccess(result) {
       overlayLoading.classList.add('hidden');
-      
+
       if (!result.success) {
         showToast('error', 'ファイルロード失敗: ' + result.error);
         overlayEmpty.classList.remove('hidden');
@@ -1523,16 +1617,11 @@
       loadedContent = result.content;
       showToast('success', `「${result.name}」を表示しました。`);
 
-      // Update mock address text
       addressFileName.textContent = `https://drive.google.com/file/d/${getActiveFileId()}/view`;
 
-      // Set iframe code directly via srcdoc
       viewerIframe.srcdoc = loadedContent;
-
-      // Set source block text content
       sourceCodeBlock.textContent = loadedContent;
 
-      // Always switch to preview viewport initially
       switchTab('preview');
     }
 
