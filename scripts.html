@@ -311,7 +311,13 @@
       loadedContent = result.content;
       showToast('success', `「${result.name}」を表示しました。`);
 
-      addressFileName.textContent = `https://drive.google.com/file/d/${getActiveFileId()}/view`;
+      // Show the Drive link from the server instead of building a URL here.
+      // GAS strips comments from served HTML and treats a double slash inside a
+      // template literal as a line comment, which truncates the line and breaks the script.
+      const activeFile = filesMap[getActiveFileId()];
+      if (activeFile && activeFile.url) {
+        addressFileName.textContent = activeFile.url;
+      }
 
       viewerIframe.srcdoc = loadedContent;
       sourceCodeBlock.textContent = loadedContent;
