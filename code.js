@@ -25,6 +25,17 @@ function doGet() {
 }
 
 /**
+ * Returns the raw content of another HTML file in this project.
+ * Used from index.html as <?!= include('styles-base'); ?> to keep the frontend split into files.
+ *
+ * @param {string} filename Project HTML file name without the .html extension.
+ * @return {string} The file's content.
+ */
+function include(filename) {
+  return HtmlService.createHtmlOutputFromFile(filename).getContent();
+}
+
+/**
  * Lists the direct children (sub-folders and HTML files) of a location.
  *
  * @param {Object} location One of:

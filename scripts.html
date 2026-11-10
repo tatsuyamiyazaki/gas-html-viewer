@@ -1,0 +1,534 @@
+  <!-- ==========================================
+     9. CLIENT-SIDE WEBAPP SCRIPTS
+     ========================================== -->
+  <script>
+    // Navigation state
+    const ROOT_CRUMB = { name: 'ドライブ', location: { kind: 'root' } };
+    let pathStack = [ROOT_CRUMB];   // Breadcrumb trail; last entry is the open folder
+    let currentItems = [];          // Items (folders + files) of the open folder
+    let filesMap = {};              // id -> file item, for the open folder
+    let loadedContent = "";         // Caches current loaded file content
+    let listRequestSeq = 0;         // Guards against out-of-order list responses
+    let shouldFocusList = false;    // Restore keyboard focus to the list after navigation
+
+    // DOM Elements Handles
+    const searchInput = document.getElementById('search-input');
+    const btnSync = document.getElementById('btn-sync');
+    const syncIcon = document.getElementById('sync-icon');
+    const breadcrumbNav = document.getElementById('breadcrumb');
+    const fileListContainer = document.getElementById('file-list');
+    const fileCountText = document.getElementById('file-count');
+
+    const activeBadge = document.getElementById('active-badge');
+    const activeFileTitle = document.getElementById('active-file-title');
+    const topMetaMetrics = document.getElementById('top-meta-metrics');
+    const metaSize = document.getElementById('meta-size');
+    const metaUpdated = document.getElementById('meta-updated');
+    const metaDriveUrl = document.getElementById('meta-drive-url');
+
+    const overlayEmpty = document.getElementById('overlay-empty');
+    const overlayLoading = document.getElementById('overlay-loading');
+    const loadingTitle = document.getElementById('loading-title');
+    const loadingDesc = document.getElementById('loading-desc');
+
+    const iframeContainer = document.getElementById('iframe-container');
+    const viewerIframe = document.getElementById('viewer-iframe');
+    const sourceContainer = document.getElementById('source-container');
+    const sourceCodeBlock = document.getElementById('source-code-block');
+    const addressFileName = document.getElementById('address-file-name');
+
+    const statusDot = document.getElementById('status-dot');
+    const statusText = document.getElementById('status-text');
+    const statusContainer = document.getElementById('status-container');
+
+    const ICON_FOLDER = '<path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>';
+    const ICON_FILE = '<rect class="ic-html-bg" x="3" y="3" width="18" height="18" rx="2"/>'
+      + '<path class="ic-html-glyph" d="M10.1 15.5 6.6 12l3.5-3.5 1.1 1.1L8.8 12l2.4 2.4zm3.8 0-1.1-1.1 2.4-2.4-2.4-2.4 1.1-1.1 3.5 3.5z"/>';
+    const ICON_CHEVRON = '<svg class="breadcrumb-sep" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>';
+    const ROW_KEY_HANDLER = "if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}";
+    const TOAST_DURATION_MS = 4000;
+    const TOAST_EXIT_MS = 300;
+    const COPY_FEEDBACK_MS = 1800;
+
+    // On Load trigger initialization sequence
+    window.addEventListener('DOMContentLoaded', () => {
+      loadCurrentFolder();
+
+      searchInput.addEventListener('input', () => {
+        handleSearch();
+      });
+
+      btnSync.addEventListener('click', () => {
+        loadCurrentFolder();
+      });
+    });
+
+    /**
+     * Push a folder onto the path and load it
+     */
+    function openFolder(index) {
+      const item = currentItems[index];
+      if (!item || item.type !== 'folder') return;
+      pathStack = [...pathStack, { name: item.name, location: item.location }];
+      loadCurrentFolder();
+    }
+
+    /**
+     * Jump back to an ancestor in the breadcrumb
+     */
+    function navigateToCrumb(depth) {
+      if (depth < 0 || depth >= pathStack.length - 1) return;
+      pathStack = pathStack.slice(0, depth + 1);
+      loadCurrentFolder();
+    }
+
+    /**
+     * Fetch children of the folder at the top of the path
+     */
+    function loadCurrentFolder() {
+      const crumb = pathStack[pathStack.length - 1];
+      const seq = ++listRequestSeq;
+
+      // Rows and crumbs are re-rendered below, which would drop focus to <body>
+      shouldFocusList = fileListContainer.contains(document.activeElement)
+        || breadcrumbNav.contains(document.activeElement);
+
+      setGlobalStatus('scanning');
+      searchInput.value = '';
+      searchInput.disabled = true;
+      btnSync.disabled = true;
+      syncIcon.classList.add('spinning');
+      renderBreadcrumb();
+
+      fileListContainer.innerHTML = `
+        <div class="list-spinner-container">
+          <div class="spinner"></div>
+          <span class="list-spinner-text">「${escapeHtml(crumb.name)}」を読み込み中...</span>
+        </div>
+      `;
+      fileCountText.textContent = '読み込み中...';
+
+      google.script.run
+        .withSuccessHandler(result => onListSuccess(result, seq))
+        .withFailureHandler(error => onListFailure(error, seq))
+        .listChildren(crumb.location);
+    }
+
+    /**
+     * Folder listing success callback handler
+     */
+    function onListSuccess(result, seq) {
+      if (seq !== listRequestSeq) return; // A newer navigation superseded this one
+      syncIcon.classList.remove('spinning');
+      btnSync.disabled = false;
+
+      if (!result.success) {
+        showToast('error', 'フォルダの読み込みに失敗しました: ' + result.error);
+        setGlobalStatus('error', 'エラーが発生しました');
+        fileListContainer.innerHTML = `<div class="list-empty-state">読み込みに失敗しました。<br>${escapeHtml(result.error)}</div>`;
+        fileCountText.textContent = 'エラー';
+        return;
+      }
+
+      currentItems = result.items || [];
+      filesMap = {};
+      currentItems.forEach(item => {
+        if (item.type === 'file') filesMap[item.id] = item;
+      });
+
+      searchInput.disabled = currentItems.length === 0;
+      setGlobalStatus('idle');
+      renderItemList(currentItems);
+
+      if (shouldFocusList) {
+        const firstRow = fileListContainer.querySelector('.file-item');
+        if (firstRow) firstRow.focus();
+        shouldFocusList = false;
+      }
+    }
+
+    /**
+     * Folder listing failure callback handler
+     */
+    function onListFailure(error, seq) {
+      if (seq !== listRequestSeq) return;
+      syncIcon.classList.remove('spinning');
+      btnSync.disabled = false;
+      setGlobalStatus('error', 'API接続エラー');
+      fileListContainer.innerHTML = `<div class="list-empty-state">GASとの接続に失敗しました。</div>`;
+      fileCountText.textContent = 'エラー';
+      showToast('error', 'サーバーとの接続中に障害が発生しました: ' + error.toString());
+    }
+
+    /**
+     * Renders the breadcrumb trail for the current path
+     */
+    function renderBreadcrumb() {
+      const parts = pathStack.map((crumb, depth) => {
+        const isCurrent = depth === pathStack.length - 1;
+        const label = escapeHtml(crumb.name);
+        const button = isCurrent
+          ? `<span class="breadcrumb-item current" title="${escapeHtmlAttr(crumb.name)}">${label}</span>`
+          : `<button type="button" class="breadcrumb-item" title="${escapeHtmlAttr(crumb.name)}" onclick="navigateToCrumb(${depth})">${label}</button>`;
+        return depth === 0 ? button : `${ICON_CHEVRON}${button}`;
+      });
+      breadcrumbNav.innerHTML = parts.join('');
+    }
+
+    /**
+     * Renders folders and files of the open folder as list-view rows
+     */
+    function renderItemList(items) {
+      if (items.length === 0) {
+        const message = currentItems.length === 0
+          ? 'このフォルダには<br>サブフォルダもHTMLファイルもありません。'
+          : '該当する項目が<br>見つかりません。';
+        fileListContainer.innerHTML = `<div class="list-empty-state">${message}</div>`;
+        updateCountText(0);
+        return;
+      }
+
+      const activeId = getActiveFileId();
+
+      const listHtml = items.map(item => {
+        const index = currentItems.indexOf(item);
+        return item.type === 'folder' ? renderFolderRow(item, index) : renderFileRow(item);
+      }).join('');
+
+      fileListContainer.innerHTML = listHtml;
+
+      if (activeId && filesMap[activeId]) {
+        const activeNode = document.getElementById(`item-${activeId}`);
+        if (activeNode) activeNode.classList.add('active');
+      }
+
+      updateCountText(items.length);
+    }
+
+    function renderFolderRow(item, index) {
+      return `
+        <div class="file-item folder" role="button" tabindex="0" onclick="openFolder(${index})" onkeydown="${ROW_KEY_HANDLER}">
+          <svg class="file-item-icon" viewBox="0 0 24 24" aria-hidden="true">${ICON_FOLDER}</svg>
+          <span class="file-item-name" title="${escapeHtmlAttr(item.name)}">${escapeHtml(item.name)}</span>
+          <span class="col-date">—</span>
+          <span class="col-size">—</span>
+        </div>
+      `;
+    }
+
+    function renderFileRow(file) {
+      return `
+        <div class="file-item" id="item-${file.id}" role="button" tabindex="0" onclick="selectFile('${file.id}')" onkeydown="${ROW_KEY_HANDLER}">
+          <svg class="file-item-icon" viewBox="0 0 24 24" aria-hidden="true">${ICON_FILE}</svg>
+          <span class="file-item-name" title="${escapeHtmlAttr(file.name)}">${escapeHtml(file.name)}</span>
+          <span class="col-date">${formatTimestampShort(file.updated)}</span>
+          <span class="col-size">${formatBytes(file.size)}</span>
+        </div>
+      `;
+    }
+
+    function updateCountText(shownCount) {
+      const folderCount = currentItems.filter(item => item.type === 'folder').length;
+      const fileCount = currentItems.length - folderCount;
+      const total = `フォルダ ${folderCount} / HTML ${fileCount}`;
+      fileCountText.textContent = shownCount === currentItems.length
+        ? total
+        : `${shownCount}件表示 (${total})`;
+    }
+
+    /**
+     * Filters the open folder's items by name
+     */
+    function handleSearch() {
+      const query = searchInput.value.toLowerCase().trim();
+      if (!query) {
+        renderItemList(currentItems);
+        return;
+      }
+      renderItemList(currentItems.filter(item => item.name.toLowerCase().includes(query)));
+    }
+
+    /**
+     * File item clicked action flow
+     */
+    function selectFile(fileId) {
+      if (!fileId || !filesMap[fileId]) return;
+      const file = filesMap[fileId];
+
+      const items = document.querySelectorAll('.file-item');
+      items.forEach(node => node.classList.remove('active'));
+
+      const activeNode = document.getElementById(`item-${fileId}`);
+      if (activeNode) {
+        activeNode.classList.add('active');
+      }
+
+      activeBadge.textContent = '選択中';
+      activeBadge.className = 'active-badge selected';
+      activeFileTitle.textContent = file.name;
+      activeFileTitle.title = file.name;
+
+      metaSize.textContent = formatBytes(file.size);
+      metaUpdated.textContent = formatTimestamp(file.updated);
+      metaDriveUrl.href = file.url;
+
+      topMetaMetrics.style.opacity = '1';
+      topMetaMetrics.style.pointerEvents = 'auto';
+
+      loadFileContent(fileId);
+    }
+
+    /**
+     * Call GAS server file reading endpoint
+     */
+    function loadFileContent(fileId) {
+      const fileMeta = filesMap[fileId];
+      if (!fileMeta) return;
+
+      overlayEmpty.classList.add('hidden');
+      overlayLoading.classList.remove('hidden');
+      loadingTitle.textContent = 'ファイルをロード中...';
+      loadingDesc.textContent = `「${fileMeta.name}」を読み込んでいます。`;
+
+      google.script.run
+        .withSuccessHandler(onContentSuccess)
+        .withFailureHandler(onContentFailure)
+        .getFileContent(fileId);
+    }
+
+    /**
+     * Fetch Content Success callback handler
+     */
+    function onContentSuccess(result) {
+      overlayLoading.classList.add('hidden');
+
+      if (!result.success) {
+        showToast('error', 'ファイルロード失敗: ' + result.error);
+        overlayEmpty.classList.remove('hidden');
+        return;
+      }
+
+      loadedContent = result.content;
+      showToast('success', `「${result.name}」を表示しました。`);
+
+      addressFileName.textContent = `https://drive.google.com/file/d/${getActiveFileId()}/view`;
+
+      viewerIframe.srcdoc = loadedContent;
+      sourceCodeBlock.textContent = loadedContent;
+
+      switchTab('preview');
+    }
+
+    /**
+     * Fetch Content Failure callback handler
+     */
+    function onContentFailure(error) {
+      overlayLoading.classList.add('hidden');
+      overlayEmpty.classList.remove('hidden');
+      showToast('error', 'サーバーとの通信中にエラーが発生しました: ' + error.toString());
+    }
+
+    /**
+     * Get active selected item ID
+     */
+    function getActiveFileId() {
+      const activeNode = fileListContainer.querySelector('.file-item.active');
+      if (activeNode) {
+        return activeNode.id.replace('item-', '');
+      }
+      return null;
+    }
+
+    /**
+     * Formatting utilities
+     */
+    function formatBytes(bytes) {
+      if (bytes === 0) return '0 Bytes';
+      const k = 1024;
+      const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    }
+
+    function formatTimestamp(timestamp) {
+      if (!timestamp) return '-';
+      const date = new Date(timestamp);
+      return date.toLocaleString('ja-JP', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    }
+
+    function formatTimestampShort(timestamp) {
+      if (!timestamp) return '-';
+      const date = new Date(timestamp);
+      return (date.getMonth() + 1) + '/' + date.getDate() + ' ' +
+             String(date.getHours()).padStart(2, '0') + ':' +
+             String(date.getMinutes()).padStart(2, '0');
+    }
+
+    /**
+     * Swapping active display tabs (Preview vs Code block)
+     */
+    function switchTab(mode) {
+      const tabPreview = document.getElementById('tab-preview');
+      const tabSource = document.getElementById('tab-source');
+      const deviceControls = document.getElementById('device-controls');
+
+      tabPreview.setAttribute('aria-pressed', String(mode === 'preview'));
+      tabSource.setAttribute('aria-pressed', String(mode !== 'preview'));
+
+      if (mode === 'preview') {
+        tabPreview.classList.add('active');
+        tabSource.classList.remove('active');
+        iframeContainer.style.display = 'flex';
+        sourceContainer.classList.remove('active');
+        deviceControls.style.display = 'flex';
+      } else {
+        tabPreview.classList.remove('active');
+        tabSource.classList.add('active');
+        iframeContainer.style.display = 'none';
+        sourceContainer.classList.add('active');
+        deviceControls.style.display = 'none';
+      }
+    }
+
+    /**
+     * Simulate PC / Tablet / Phone sizes
+     */
+    function setDeviceWidth(size) {
+      const devDesktop = document.getElementById('device-desktop');
+      const devTablet = document.getElementById('device-tablet');
+      const devMobile = document.getElementById('device-mobile');
+
+      devDesktop.classList.remove('active');
+      devTablet.classList.remove('active');
+      devMobile.classList.remove('active');
+
+      iframeContainer.className = 'iframe-holder'; // resets
+
+      if (size === 'desktop') {
+        devDesktop.classList.add('active');
+        iframeContainer.classList.add('width-desktop');
+      } else if (size === 'tablet') {
+        devTablet.classList.add('active');
+        iframeContainer.classList.add('width-tablet');
+      } else if (size === 'mobile') {
+        devMobile.classList.add('active');
+        iframeContainer.classList.add('width-mobile');
+      }
+    }
+
+    /**
+     * Copy raw files content string to clipboard
+     */
+    function copySourceCode() {
+      if (!loadedContent) {
+        showToast('warning', 'コピーするコードがありません。');
+        return;
+      }
+
+      navigator.clipboard.writeText(loadedContent)
+        .then(() => {
+          showToast('success', 'コードをクリップボードにコピーしました');
+
+          const copyBtn = document.getElementById('btn-copy-code');
+          const originalHTML = copyBtn.innerHTML;
+          copyBtn.innerHTML = `
+            <svg viewBox="0 0 24 24" style="fill: var(--gd-success);">
+              <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/>
+            </svg>
+          `;
+          setTimeout(() => {
+            copyBtn.innerHTML = originalHTML;
+          }, COPY_FEEDBACK_MS);
+        })
+        .catch(err => {
+          showToast('error', 'コピーできませんでした: ' + err);
+        });
+    }
+
+    /**
+     * Global interface Status chip sync
+     */
+    function setGlobalStatus(state, message = '') {
+      statusDot.className = 'status-dot';
+
+      if (state === 'scanning') {
+        statusDot.classList.add('loading');
+        statusText.textContent = 'Driveをスキャン中...';
+      } else if (state === 'error') {
+        statusDot.classList.add('error');
+        statusText.textContent = message || '接続エラー';
+      } else {
+        statusText.textContent = 'GAS API 接続完了';
+      }
+      // Status text is visually hidden on phones, so mirror it into the tooltip
+      statusContainer.title = statusText.textContent;
+    }
+
+    /**
+     * Snackbar popups maker
+     */
+    function showToast(type, text) {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      toast.className = `toast toast-${type}`;
+
+      let iconSvg = '';
+      if (type === 'success') {
+        iconSvg = '<svg class="toast-icon" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>';
+      } else if (type === 'error') {
+        iconSvg = '<svg class="toast-icon" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v5z"/></svg>';
+      } else if (type === 'warning') {
+        iconSvg = '<svg class="toast-icon" viewBox="0 0 24 24"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>';
+      } else {
+        iconSvg = '<svg class="toast-icon" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>';
+      }
+
+      // Text may include file names or server errors, so it is always escaped
+      toast.innerHTML = `${iconSvg}<span>${escapeHtml(text)}</span>`;
+
+      container.appendChild(toast);
+
+      setTimeout(() => {
+        toast.classList.add('show');
+      }, 50);
+
+      setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => {
+          container.removeChild(toast);
+        }, TOAST_EXIT_MS);
+      }, TOAST_DURATION_MS);
+    }
+
+    /**
+     * Escape HTML special characters
+     */
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    /**
+     * Escape HTML attributes values specifically
+     */
+    function escapeHtmlAttr(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+  </script>
